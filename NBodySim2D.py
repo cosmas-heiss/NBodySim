@@ -182,6 +182,7 @@ class NBodySimulator:
         self.program_fft_input = self.context.compute_shader(self.load_file('FFTInputShader.glsl'))
         self.program_fft_mult = self.context.compute_shader(self.load_file('FFTMultShader.glsl'))
         self.program_fft_output = self.context.compute_shader(self.load_file('FFTOutputShader.glsl'))
+        self.program_color = self.context.compute_shader(self.load_file('ColoringShader.glsl'))
 
         # setting up texure and ssbo buffers
         self.set_up_buffers()
@@ -242,6 +243,12 @@ class NBodySimulator:
         # one for the x-force and one for the y-force)
         self.dens_fft_tex1 = self.context.texture(self.mesh_size, 4, dtype='f4')
         self.dens_fft_tex2 = self.context.texture(self.mesh_size, 4, dtype='f4')
+
+        # buffer containing the colors from cm plasma
+        plasma_colors = cm.plasma(np.linspace(0, 1, 32)[:, None], bytes=True).astype(np.float32)
+        plasma_colors[0, 0, :3] = 0.0
+        self.colormap_tex = self.context.texture((32, 1), 4, dtype='f4', data=plasma_colors.transpose(1, 0, 2))
+        self.out_color_tex = self.context.texture(self.show_size, 4, dtype='u1')
 
     def init_body_data(self):
         """
@@ -400,6 +407,8 @@ class NBodySimulator:
         self.program_fft_mult['mesh_exponent'] = self.mesh_exponent
         self.program_fft_output['mesh_size'] = self.mesh_size
 
+        self.program_color['size'] = self.show_size
+
     def make_output_color(self, output_array):
         """
         This function uses a matplotlib colormap to assign colors to the densities
@@ -509,10 +518,19 @@ class NBodySimulator:
         self.program_show.run(group_x=int(np.ceil(self.num_bodys / 128)))
         self.context.finish()
 
-        # output mass distribution in viewport is transferred CPU, colored and returned
-        output_array = np.frombuffer(self.show_tex.read(), 'float32').copy().reshape(self.show_size[1], self.show_size[0]).T
-        output_color_array = self.make_output_color(output_array)
-        return output_color_array
+        max_val = np.max(np.frombuffer(self.show_tex.read(), 'float32'))
+        max_val = max_val * 0.01 if max_val < 100 else np.log(max_val) - 3.60517019
+        self.color_norm_factor = 0.8 * self.color_norm_factor + 0.2 * max_val
+
+        self.colormap_tex.use(0)
+        self.show_tex.use(1)
+        self.out_color_tex.bind_to_image(2)
+        self.program_color['color_norm_factor'] = self.color_norm_factor
+        self.program_color.run(group_x=int(np.ceil(self.show_size[0] / 32)), group_y=int(np.ceil(self.show_size[1] / 32)))
+        self.context.finish()
+        # output mass distribution in viewport is colored, transferred CPU and returned
+        output_array = np.frombuffer(self.out_color_tex.read(), 'uint8').copy().reshape(self.show_size[1], self.show_size[0], 4).transpose(1, 0, 2)[:, :, :3]
+        return output_array
 
 
 
